@@ -1,0 +1,33 @@
+# 编译输出
+*.ko
+*.o
+*.mod.c
+*.mod.o
+*.symvers
+*.order
+*.cmd
+.tmp_versions/
+modules.order
+Module.symvers
+
+# 内核构建文件
+*.d
+*.d.tmp
+
+# 调试文件
+*.dwo
+*.dwp
+
+# 编辑器文件
+*~
+*.swp
+*.swo
+*#
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
+# 备份文件
+*.bak
+*.backup

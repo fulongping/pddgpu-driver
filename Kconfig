@@ -1,0 +1,29 @@
+# PDDGPU驱动配置
+
+config DRM_PDDGPU
+	tristate "PDDGPU support"
+	depends on DRM && PCI
+	select DRM_TTM
+	select DRM_TTM_HELPER
+	select DRM_KMS_HELPER
+	select DRM_KMS_FB_HELPER
+	select DRM_GEM_SHMEM_HELPER
+	help
+	  This enables support for PDDGPU graphics cards.
+	  Choose M if you have a PDDGPU graphics card and want to use it.
+	  Choose N if you don't have a PDDGPU graphics card.
+
+config DRM_PDDGPU_DEBUG
+	bool "PDDGPU debug support"
+	depends on DRM_PDDGPU
+	help
+	  This enables debug support for PDDGPU driver.
+	  Say Y if you want to enable debug features.
+
+config DRM_PDDGPU_FBDEV
+	bool "PDDGPU framebuffer support"
+	depends on DRM_PDDGPU
+	select DRM_KMS_FB_HELPER
+	help
+	  This enables framebuffer support for PDDGPU driver.
+	  Say Y if you want to use PDDGPU as a framebuffer device.

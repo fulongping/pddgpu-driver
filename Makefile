@@ -4,11 +4,10 @@ obj-m := pddgpu.o
 
 pddgpu-objs := pddgpu_drv.o \
                 pddgpu_device.o \
-                pddgpu_gmc.o \
-                pddgpu_object.o \
                 pddgpu_gem.o \
-                pddgpu_ttm.o \
-                pddgpu_vram_mgr.o
+                pddgpu_object.o \
+                pddgpu_vram_mgr.o \
+                pddgpu_gtt_mgr.o
 
 # 内核源码路径
 KERNEL_DIR ?= /lib/modules/$(shell uname -r)/build

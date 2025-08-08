@@ -106,7 +106,7 @@ int pddgpu_gem_map_ioctl(struct drm_device *dev, void *data,
 	PDDGPU_DEBUG("GEM map: handle=%u, offset=%llu, size=%llu, flags=0x%llx\n",
 	             args->handle, args->offset, args->size, args->flags);
 	
-	/* 查找GEM对象 */
+	/* 获取GEM对象 */
 	gobj = drm_gem_object_lookup(filp, args->handle);
 	if (!gobj) {
 		PDDGPU_ERROR("Invalid handle: %u\n", args->handle);
@@ -115,19 +115,27 @@ int pddgpu_gem_map_ioctl(struct drm_device *dev, void *data,
 	
 	bo = to_pddgpu_bo(gobj);
 	
-	/* 映射缓冲区 */
-	ret = pddgpu_bo_kmap(bo, &args->offset);
+	/* 验证参数 */
+	if (args->offset + args->size > gobj->size) {
+		PDDGPU_ERROR("Invalid mapping range\n");
+		drm_gem_object_put(gobj);
+		return -EINVAL;
+	}
+	
+	/* 映射BO */
+	ret = ttm_bo_kmap(&bo->tbo, args->offset, args->size, &bo->kptr);
 	if (ret) {
 		PDDGPU_ERROR("Failed to map BO: %d\n", ret);
 		drm_gem_object_put(gobj);
 		return ret;
 	}
 	
-	args->size = bo->size;
-	
-	PDDGPU_DEBUG("GEM mapped: offset=%llu, size=%llu\n", args->offset, args->size);
+	/* 返回映射地址 */
+	args->offset = (u64)bo->kptr;
 	
 	drm_gem_object_put(gobj);
+	
+	PDDGPU_DEBUG("GEM mapped: addr=0x%llx\n", args->offset);
 	
 	return 0;
 }
@@ -142,7 +150,7 @@ int pddgpu_gem_info_ioctl(struct drm_device *dev, void *data,
 	
 	PDDGPU_DEBUG("GEM info: handle=%u\n", args->handle);
 	
-	/* 查找GEM对象 */
+	/* 获取GEM对象 */
 	gobj = drm_gem_object_lookup(filp, args->handle);
 	if (!gobj) {
 		PDDGPU_ERROR("Invalid handle: %u\n", args->handle);
@@ -152,15 +160,15 @@ int pddgpu_gem_info_ioctl(struct drm_device *dev, void *data,
 	bo = to_pddgpu_bo(gobj);
 	
 	/* 填充信息 */
-	args->size = bo->size;
-	args->offset = bo->tbo.resource ? bo->tbo.resource->start << PAGE_SHIFT : 0;
+	args->size = gobj->size;
+	args->offset = ttm_bo_gpu_offset(&bo->tbo);
 	args->domain = bo->domain;
 	args->flags = bo->flags;
 	
-	PDDGPU_DEBUG("GEM info: size=%llu, offset=%llu, domain=0x%x, flags=0x%x\n",
-	             args->size, args->offset, args->domain, args->flags);
-	
 	drm_gem_object_put(gobj);
+	
+	PDDGPU_DEBUG("GEM info: size=%llu, offset=0x%llx, domain=0x%x\n",
+	             args->size, args->offset, args->domain);
 	
 	return 0;
 }
@@ -171,20 +179,23 @@ int pddgpu_gem_destroy_ioctl(struct drm_device *dev, void *data,
 {
 	struct drm_pddgpu_gem_create *args = data;
 	struct drm_gem_object *gobj;
+	struct pddgpu_bo *bo;
 	
 	PDDGPU_DEBUG("GEM destroy: handle=%u\n", args->handle);
 	
-	/* 查找GEM对象 */
+	/* 获取GEM对象 */
 	gobj = drm_gem_object_lookup(filp, args->handle);
 	if (!gobj) {
 		PDDGPU_ERROR("Invalid handle: %u\n", args->handle);
 		return -ENOENT;
 	}
 	
-	/* 删除句柄 */
-	drm_gem_handle_delete(filp, args->handle);
+	bo = to_pddgpu_bo(gobj);
 	
-	/* 释放对象 */
+	/* 释放BO */
+	pddgpu_bo_unref(&bo);
+	
+	/* 释放GEM对象 */
 	drm_gem_object_put(gobj);
 	
 	PDDGPU_DEBUG("GEM destroyed: handle=%u\n", args->handle);
@@ -192,88 +203,114 @@ int pddgpu_gem_destroy_ioctl(struct drm_device *dev, void *data,
 	return 0;
 }
 
-/* GEM打开对象 */
+/* GEM对象打开 */
 int pddgpu_gem_open_object(struct drm_gem_object *obj, struct drm_file *file)
 {
 	struct pddgpu_bo *bo = to_pddgpu_bo(obj);
 	
-	PDDGPU_DEBUG("GEM open object: size=%llu\n", bo->size);
+	PDDGPU_DEBUG("GEM open object: %p\n", obj);
+	
+	/* 增加引用计数 */
+	ttm_bo_get(&bo->tbo);
 	
 	return 0;
 }
 
-/* GEM关闭对象 */
+/* GEM对象关闭 */
 void pddgpu_gem_close_object(struct drm_gem_object *obj, struct drm_file *file)
 {
 	struct pddgpu_bo *bo = to_pddgpu_bo(obj);
 	
-	PDDGPU_DEBUG("GEM close object: size=%llu\n", bo->size);
+	PDDGPU_DEBUG("GEM close object: %p\n", obj);
+	
+	/* 减少引用计数 */
+	ttm_bo_put(&bo->tbo);
 }
 
-/* GEM释放对象 */
+/* GEM对象释放 */
 void pddgpu_gem_free_object(struct drm_gem_object *obj)
 {
 	struct pddgpu_bo *bo = to_pddgpu_bo(obj);
 	
-	PDDGPU_DEBUG("GEM free object: size=%llu\n", bo->size);
+	PDDGPU_DEBUG("GEM free object: %p\n", obj);
 	
+	/* 释放BO */
 	pddgpu_bo_unref(&bo);
 }
 
-/* GEM打印信息 */
+/* GEM对象信息打印 */
 void pddgpu_gem_print_info(struct drm_printer *p, unsigned int indent,
                            const struct drm_gem_object *obj)
 {
 	struct pddgpu_bo *bo = to_pddgpu_bo(obj);
 	
-	drm_printf_indent(p, indent, "PDDGPU BO: size=%llu, domain=0x%x, flags=0x%x\n",
-	                  bo->size, bo->domain, bo->flags);
+	drm_printf_indent(p, indent, "PDDGPU BO:\n");
+	drm_printf_indent(p, indent + 1, "Size: %zu\n", obj->size);
+	drm_printf_indent(p, indent + 1, "Domain: 0x%x\n", bo->domain);
+	drm_printf_indent(p, indent + 1, "Flags: 0x%x\n", bo->flags);
+	drm_printf_indent(p, indent + 1, "Pin count: %u\n", bo->pin_count);
 }
 
-/* Prime导出 */
+/* GEM Prime导出 */
 struct dma_buf *pddgpu_gem_prime_export(struct drm_gem_object *obj, int flags)
 {
 	struct pddgpu_bo *bo = to_pddgpu_bo(obj);
 	
-	PDDGPU_DEBUG("GEM prime export: size=%llu\n", bo->size);
+	PDDGPU_DEBUG("GEM prime export: %p\n", obj);
 	
+	/* 使用TTM的DMA-BUF导出 */
 	return drm_gem_dmabuf_export(obj->dev, obj, flags);
 }
 
-/* Prime映射 */
+/* GEM Prime vmap */
 int pddgpu_gem_prime_vmap(struct drm_gem_object *obj, struct iosys_map *map)
 {
 	struct pddgpu_bo *bo = to_pddgpu_bo(obj);
-	void *vaddr;
 	int ret;
 	
-	PDDGPU_DEBUG("GEM prime vmap: size=%llu\n", bo->size);
+	PDDGPU_DEBUG("GEM prime vmap: %p\n", obj);
 	
-	ret = pddgpu_bo_kmap(bo, &vaddr);
-	if (ret)
+	/* 映射BO */
+	ret = ttm_bo_kmap(&bo->tbo, 0, obj->size, &bo->kptr);
+	if (ret) {
+		PDDGPU_ERROR("Failed to map BO: %d\n", ret);
 		return ret;
+	}
 	
-	iosys_map_set_vaddr(map, vaddr);
+	/* 设置映射信息 */
+	iosys_map_set_vaddr(map, bo->kptr);
 	
 	return 0;
 }
 
-/* Prime取消映射 */
+/* GEM Prime vunmap */
 void pddgpu_gem_prime_vunmap(struct drm_gem_object *obj, struct iosys_map *map)
 {
 	struct pddgpu_bo *bo = to_pddgpu_bo(obj);
 	
-	PDDGPU_DEBUG("GEM prime vunmap: size=%llu\n", bo->size);
+	PDDGPU_DEBUG("GEM prime vunmap: %p\n", obj);
 	
-	pddgpu_bo_kunmap(bo);
+	/* 取消映射 */
+	if (bo->kptr) {
+		ttm_bo_kunmap(&bo->tbo, 0);
+		bo->kptr = NULL;
+	}
 }
 
-/* Prime MMAP */
+/* GEM Prime mmap */
 int pddgpu_gem_prime_mmap(struct drm_gem_object *obj, struct vm_area_struct *vma)
 {
 	struct pddgpu_bo *bo = to_pddgpu_bo(obj);
+	int ret;
 	
-	PDDGPU_DEBUG("GEM prime mmap: size=%llu\n", bo->size);
+	PDDGPU_DEBUG("GEM prime mmap: %p\n", obj);
 	
-	return pddgpu_bo_mmap(bo, vma);
+	/* 使用TTM的mmap */
+	ret = ttm_bo_mmap(&bo->tbo, vma);
+	if (ret) {
+		PDDGPU_ERROR("Failed to mmap BO: %d\n", ret);
+		return ret;
+	}
+	
+	return 0;
 }

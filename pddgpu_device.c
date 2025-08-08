@@ -14,6 +14,7 @@
 #include "pddgpu_gmc.h"
 #include "pddgpu_ttm.h"
 #include "pddgpu_vram_mgr.h"
+#include "pddgpu_gtt_mgr.h"
 
 /* 设备初始化 */
 int pddgpu_device_init(struct pddgpu_device *pdev)
@@ -31,7 +32,10 @@ int pddgpu_device_init(struct pddgpu_device *pdev)
 		return -ENOMEM;
 	}
 	
-	/* 读取设备信息 */
+	/*
+	 * 读取硬件寄存器获取设备信息
+	 * 这些偏移值由硬件设计文档规定
+	 */
 	pdev->chip_id = PDDGPU_READ32(pdev->rmmio + PDDGPU_REG_CHIP_ID);
 	pdev->chip_rev = PDDGPU_READ32(pdev->rmmio + PDDGPU_REG_CHIP_REV);
 	pdev->vram_size = PDDGPU_READ64(pdev->rmmio + PDDGPU_REG_VRAM_SIZE);
@@ -62,10 +66,19 @@ int pddgpu_device_init(struct pddgpu_device *pdev)
 		goto err_ttm_fini;
 	}
 	
+	/* 初始化GTT管理器 */
+	ret = pddgpu_gtt_mgr_init(pdev, pdev->gtt_size);
+	if (ret) {
+		PDDGPU_ERROR("Failed to initialize GTT manager\n");
+		goto err_vram_mgr_fini;
+	}
+	
 	PDDGPU_DEBUG("PDDGPU device initialized successfully\n");
 	
 	return 0;
 
+err_vram_mgr_fini:
+	pddgpu_vram_mgr_fini(pdev);
 err_ttm_fini:
 	pddgpu_ttm_fini(pdev);
 err_gmc_fini:
@@ -83,6 +96,9 @@ void pddgpu_device_fini(struct pddgpu_device *pdev)
 	
 	PDDGPU_DEBUG("Finalizing PDDGPU device\n");
 	
+	/* 清理GTT管理器 */
+	pddgpu_gtt_mgr_fini(pdev);
+	
 	/* 清理VRAM管理器 */
 	pddgpu_vram_mgr_fini(pdev);
 	
@@ -93,7 +109,10 @@ void pddgpu_device_fini(struct pddgpu_device *pdev)
 	pddgpu_gmc_fini(pdev);
 	
 	/* 取消映射MMIO */
-	pci_iounmap(pci_dev, pdev->rmmio);
+	if (pdev->rmmio) {
+		pci_iounmap(pci_dev, pdev->rmmio);
+		pdev->rmmio = NULL;
+	}
 	
 	PDDGPU_DEBUG("PDDGPU device finalized\n");
 }

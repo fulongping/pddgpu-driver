@@ -45,11 +45,18 @@ int pddgpu_device_init(struct pddgpu_device *pdev)
 	PDDGPU_INFO("VRAM Size: %llu MB, GTT Size: %llu MB\n", 
 	            pdev->vram_size >> 20, pdev->gtt_size >> 20);
 	
+	/* 初始化内存统计模块 */
+	ret = pddgpu_memory_stats_init(pdev);
+	if (ret) {
+		PDDGPU_ERROR("Failed to initialize memory statistics module\n");
+		goto err_unmap_mmio;
+	}
+	
 	/* 初始化GMC */
 	ret = pddgpu_gmc_init(pdev);
 	if (ret) {
 		PDDGPU_ERROR("Failed to initialize GMC\n");
-		goto err_unmap_mmio;
+		goto err_memory_stats_fini;
 	}
 	
 	/* 初始化TTM */
@@ -83,6 +90,8 @@ err_ttm_fini:
 	pddgpu_ttm_fini(pdev);
 err_gmc_fini:
 	pddgpu_gmc_fini(pdev);
+err_memory_stats_fini:
+	pddgpu_memory_stats_fini(pdev);
 err_unmap_mmio:
 	pci_iounmap(pci_dev, pdev->rmmio);
 	
@@ -108,11 +117,12 @@ void pddgpu_device_fini(struct pddgpu_device *pdev)
 	/* 清理GMC */
 	pddgpu_gmc_fini(pdev);
 	
-	/* 取消映射MMIO */
-	if (pdev->rmmio) {
+	/* 清理内存统计模块 */
+	pddgpu_memory_stats_fini(pdev);
+	
+	/* 取消映射MMIO区域 */
+	if (pdev->rmmio)
 		pci_iounmap(pci_dev, pdev->rmmio);
-		pdev->rmmio = NULL;
-	}
 	
 	PDDGPU_DEBUG("PDDGPU device finalized\n");
 }

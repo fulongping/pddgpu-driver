@@ -120,6 +120,45 @@ struct pddgpu_device {
 	/* 统计信息 */
 	atomic_t num_evictions;
 	atomic64_t num_bytes_moved;
+	
+	/* 内存统计模块 */
+	struct {
+		/* 内存使用统计 */
+		atomic64_t vram_allocated;
+		atomic64_t vram_freed;
+		atomic64_t gtt_allocated;
+		atomic64_t gtt_freed;
+		atomic64_t total_allocations;
+		atomic64_t total_deallocations;
+		
+		/* 内存泄漏检测 */
+		struct {
+			spinlock_t lock;
+			struct list_head allocated_objects;
+			atomic64_t leak_suspicious_count;
+			atomic64_t leak_confirmed_count;
+			u64 last_check_time;
+			u64 check_interval;
+		} leak_detector;
+		
+		/* 性能统计 */
+		struct {
+			atomic64_t allocation_time_total;
+			atomic64_t allocation_count;
+			atomic64_t deallocation_time_total;
+			atomic64_t deallocation_count;
+			atomic64_t move_operations;
+			atomic64_t move_time_total;
+		} performance;
+		
+		/* 调试统计 */
+		struct {
+			atomic64_t debug_allocations;
+			atomic64_t debug_deallocations;
+			atomic64_t debug_moves;
+			atomic64_t debug_evictions;
+		} debug;
+	} memory_stats;
 };
 
 /* PDDGPU BO */

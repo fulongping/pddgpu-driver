@@ -55,6 +55,11 @@ struct pddgpu_bo {
 	 * for memory accounting.
 	 */
 	int8_t xcp_id;
+	
+	/* 内存统计相关字段 */
+	ktime_t allocation_start_time;
+	ktime_t deallocation_start_time;
+	ktime_t move_start_time;
 };
 
 /* PDDGPU VRAM管理器 */

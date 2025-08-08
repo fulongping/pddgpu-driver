@@ -19,30 +19,31 @@
 /* 设备初始化 */
 int pddgpu_device_init(struct pddgpu_device *pdev)
 {
-	struct drm_device *ddev = pdev->ddev;
 	struct pci_dev *pci_dev = pdev->pdev;
 	int ret;
 	
 	PDDGPU_DEBUG("Initializing PDDGPU device\n");
 	
+	/* 设置设备状态为初始化中 */
+	atomic_set(&pdev->device_state, PDDGPU_DEVICE_STATE_INITIALIZING);
+	
 	/* 映射MMIO区域 */
 	pdev->rmmio = pci_iomap(pci_dev, 0, 0);
 	if (!pdev->rmmio) {
 		PDDGPU_ERROR("Failed to map MMIO region\n");
-		return -ENOMEM;
+		ret = -ENOMEM;
+		goto err_exit;
 	}
 	
-	/*
-	 * 读取硬件寄存器获取设备信息
-	 * 这些偏移值由硬件设计文档规定
-	 */
-	pdev->chip_id = PDDGPU_READ32(pdev->rmmio + PDDGPU_REG_CHIP_ID);
-	pdev->chip_rev = PDDGPU_READ32(pdev->rmmio + PDDGPU_REG_CHIP_REV);
-	pdev->vram_size = PDDGPU_READ64(pdev->rmmio + PDDGPU_REG_VRAM_SIZE);
-	pdev->gtt_size = PDDGPU_READ64(pdev->rmmio + PDDGPU_REG_GTT_SIZE);
+	/* 读取设备信息 */
+	pdev->chip_id = PDDGPU_READ32(pdev, PDDGPU_REG_CHIP_ID);
+	pdev->chip_rev = PDDGPU_READ32(pdev, PDDGPU_REG_CHIP_REV);
+	pdev->vram_size = PDDGPU_READ64(pdev, PDDGPU_REG_VRAM_SIZE);
+	pdev->gtt_size = PDDGPU_READ64(pdev, PDDGPU_REG_GTT_SIZE);
 	
-	PDDGPU_INFO("Chip ID: 0x%08x, Rev: 0x%08x\n", pdev->chip_id, pdev->chip_rev);
-	PDDGPU_INFO("VRAM Size: %llu MB, GTT Size: %llu MB\n", 
+	PDDGPU_INFO("PDDGPU device: chip_id=0x%08x, chip_rev=0x%08x\n",
+	            pdev->chip_id, pdev->chip_rev);
+	PDDGPU_INFO("Memory: VRAM=%llu MB, GTT=%llu MB\n",
 	            pdev->vram_size >> 20, pdev->gtt_size >> 20);
 	
 	/* 初始化内存统计模块 */
@@ -80,8 +81,10 @@ int pddgpu_device_init(struct pddgpu_device *pdev)
 		goto err_vram_mgr_fini;
 	}
 	
-	PDDGPU_DEBUG("PDDGPU device initialized successfully\n");
+	/* 设置设备状态为就绪 */
+	atomic_set(&pdev->device_state, PDDGPU_DEVICE_STATE_READY);
 	
+	PDDGPU_DEBUG("PDDGPU device initialized successfully\n");
 	return 0;
 
 err_vram_mgr_fini:
@@ -93,8 +96,11 @@ err_gmc_fini:
 err_memory_stats_fini:
 	pddgpu_memory_stats_fini(pdev);
 err_unmap_mmio:
-	pci_iounmap(pci_dev, pdev->rmmio);
-	
+	if (pdev->rmmio)
+		pci_iounmap(pci_dev, pdev->rmmio);
+err_exit:
+	/* 设置设备状态为关闭 */
+	atomic_set(&pdev->device_state, PDDGPU_DEVICE_STATE_SHUTDOWN);
 	return ret;
 }
 
@@ -104,6 +110,9 @@ void pddgpu_device_fini(struct pddgpu_device *pdev)
 	struct pci_dev *pci_dev = pdev->pdev;
 	
 	PDDGPU_DEBUG("Finalizing PDDGPU device\n");
+	
+	/* 设置设备状态为关闭中 */
+	atomic_set(&pdev->device_state, PDDGPU_DEVICE_STATE_SHUTDOWN);
 	
 	/* 清理GTT管理器 */
 	pddgpu_gtt_mgr_fini(pdev);

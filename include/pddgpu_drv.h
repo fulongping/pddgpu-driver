@@ -44,6 +44,11 @@
 #define PDDGPU_MEMORY_LEAK_MONITOR_ENABLED 1
 #define PDDGPU_MEMORY_LEAK_THRESHOLD (100 * 1024 * 1024) /* 100MB */
 
+/* 设备状态标志 */
+#define PDDGPU_DEVICE_STATE_INITIALIZING 0x01
+#define PDDGPU_DEVICE_STATE_READY        0x02
+#define PDDGPU_DEVICE_STATE_SHUTDOWN     0x04
+
 /* 前向声明 */
 struct pddgpu_device;
 struct pddgpu_bo;
@@ -121,6 +126,9 @@ struct pddgpu_device {
 	u64 vram_size;
 	u64 gtt_size;
 	
+	/* 设备状态 */
+	atomic_t device_state;
+	
 	/* 统计信息 */
 	atomic_t num_evictions;
 	atomic64_t num_bytes_moved;
@@ -138,6 +146,7 @@ struct pddgpu_device {
 		/* 内存泄漏检测 */
 		struct {
 			spinlock_t lock;
+			struct rw_semaphore leak_detector_rwsem; /* 读写锁 */
 			struct list_head allocated_objects;
 			atomic64_t leak_suspicious_count;
 			atomic64_t leak_confirmed_count;
@@ -282,10 +291,10 @@ static inline struct pddgpu_device *drm_to_pdev(struct drm_device *ddev)
 }
 
 /* 内存访问宏 */
-#define PDDGPU_READ32(addr) readl(addr)
-#define PDDGPU_WRITE32(addr, val) writel(val, addr)
-#define PDDGPU_READ64(addr) readq(addr)
-#define PDDGPU_WRITE64(addr, val) writeq(val, addr)
+#define PDDGPU_READ32(pdev, reg) readl((pdev)->rmmio + (reg))
+#define PDDGPU_WRITE32(pdev, reg, val) writel((val), (pdev)->rmmio + (reg))
+#define PDDGPU_READ64(pdev, reg) readq((pdev)->rmmio + (reg))
+#define PDDGPU_WRITE64(pdev, reg, val) writeq((val), (pdev)->rmmio + (reg))
 
 /* 调试宏 */
 #define PDDGPU_DEBUG(fmt, ...) pr_debug("PDDGPU: " fmt, ##__VA_ARGS__)

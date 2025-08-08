@@ -12,13 +12,48 @@
 #include <linux/list.h>
 #include <linux/atomic.h>
 #include <linux/ktime.h>
+#include <linux/rcupdate.h> /* RCU保护 */
+#include <linux/rwsem.h> /* 读写锁 */
+#include <linux/sched.h> /* pid_t */
 
 struct pddgpu_device;
 struct pddgpu_bo;
 
-/* 内存泄漏检测对象 */
+/* 并发控制宏 */
+#define PDDGPU_MEMORY_STATS_LOCK(pdev, flags) \
+	spin_lock_irqsave(&(pdev)->memory_stats.leak_detector.lock, flags)
+
+#define PDDGPU_MEMORY_STATS_UNLOCK(pdev, flags) \
+	spin_unlock_irqrestore(&(pdev)->memory_stats.leak_detector.lock, flags)
+
+#define PDDGPU_MEMORY_STATS_READ_LOCK(pdev) \
+	down_read(&(pdev)->memory_stats.leak_detector_rwsem)
+
+#define PDDGPU_MEMORY_STATS_READ_UNLOCK(pdev) \
+	up_read(&(pdev)->memory_stats.leak_detector_rwsem)
+
+#define PDDGPU_MEMORY_STATS_WRITE_LOCK(pdev) \
+	down_write(&(pdev)->memory_stats.leak_detector_rwsem)
+
+#define PDDGPU_MEMORY_STATS_WRITE_UNLOCK(pdev) \
+	up_write(&(pdev)->memory_stats.leak_detector_rwsem)
+
+/* 批量操作结构体 */
+struct pddgpu_memory_stats_batch {
+	u64 vram_allocated;
+	u64 vram_freed;
+	u64 gtt_allocated;
+	u64 gtt_freed;
+	u64 total_allocations;
+	u64 total_deallocations;
+	u64 move_operations;
+	u64 move_time_total;
+};
+
+/* 无锁链表节点 */
 struct pddgpu_memory_leak_object {
 	struct list_head list;
+	struct rcu_head rcu;  /* RCU保护 */
 	struct pddgpu_bo *bo;
 	u64 allocation_time;
 	u64 size;
@@ -27,6 +62,7 @@ struct pddgpu_memory_leak_object {
 	char caller_info[64];
 	pid_t pid;
 	u64 timestamp;
+	atomic_t ref_count; /* 引用计数 */
 };
 
 /* 内存统计信息 */
@@ -74,6 +110,10 @@ void pddgpu_memory_stats_move_end(struct pddgpu_device *pdev,
 void pddgpu_memory_stats_leak_check(struct pddgpu_device *pdev);
 void pddgpu_memory_stats_leak_report(struct pddgpu_device *pdev);
 
+/* RCU保护的只读内存泄漏检测 */
+void pddgpu_memory_stats_leak_check_rcu(struct pddgpu_device *pdev);
+void pddgpu_memory_stats_leak_report_rcu(struct pddgpu_device *pdev);
+
 /* 获取内存统计信息 */
 void pddgpu_memory_stats_get_info(struct pddgpu_device *pdev, 
                                   struct pddgpu_memory_stats_info *info);
@@ -97,6 +137,20 @@ void pddgpu_memory_leak_monitor_work(struct work_struct *work);
 /* 内存使用统计更新 */
 void pddgpu_memory_stats_update_usage(struct pddgpu_device *pdev, u32 domain, u64 size, bool alloc);
 
+/* 批量操作接口 */
+void pddgpu_memory_stats_batch_update(struct pddgpu_device *pdev,
+                                     struct pddgpu_memory_stats_batch *batch);
+
+/* 改进的错误处理接口 */
+int pddgpu_memory_stats_leak_check_safe(struct pddgpu_device *pdev);
+int pddgpu_memory_stats_leak_report_safe(struct pddgpu_device *pdev);
+
+/* 无锁操作接口 */
+void pddgpu_memory_stats_add_leak_object_lockfree(struct pddgpu_device *pdev, 
+                                                  struct pddgpu_bo *bo);
+void pddgpu_memory_stats_remove_leak_object_lockfree(struct pddgpu_device *pdev, 
+                                                     struct pddgpu_bo *bo);
+
 /* 内存泄漏检测辅助函数 */
 static inline void pddgpu_memory_stats_add_leak_object(struct pddgpu_device *pdev, 
                                                        struct pddgpu_bo *bo)
@@ -115,14 +169,15 @@ static inline void pddgpu_memory_stats_add_leak_object(struct pddgpu_device *pde
 	leak_obj->flags = bo->tbo.base.flags;
 	leak_obj->pid = current->pid;
 	leak_obj->timestamp = ktime_get_ns();
+	atomic_set(&leak_obj->ref_count, 1);
 	
 	/* 获取调用者信息 */
 	snprintf(leak_obj->caller_info, sizeof(leak_obj->caller_info), 
 	         "PID:%d", current->pid);
 	
-	spin_lock_irqsave(&pdev->memory_stats.leak_detector.lock, flags);
+	PDDGPU_MEMORY_STATS_LOCK(pdev, flags);
 	list_add_tail(&leak_obj->list, &pdev->memory_stats.leak_detector.allocated_objects);
-	spin_unlock_irqrestore(&pdev->memory_stats.leak_detector.lock, flags);
+	PDDGPU_MEMORY_STATS_UNLOCK(pdev, flags);
 }
 
 static inline void pddgpu_memory_stats_remove_leak_object(struct pddgpu_device *pdev, 
@@ -131,7 +186,7 @@ static inline void pddgpu_memory_stats_remove_leak_object(struct pddgpu_device *
 	struct pddgpu_memory_leak_object *leak_obj, *temp;
 	unsigned long flags;
 	
-	spin_lock_irqsave(&pdev->memory_stats.leak_detector.lock, flags);
+	PDDGPU_MEMORY_STATS_LOCK(pdev, flags);
 	list_for_each_entry_safe(leak_obj, temp, 
 	                        &pdev->memory_stats.leak_detector.allocated_objects, list) {
 		if (leak_obj->bo == bo) {
@@ -140,7 +195,20 @@ static inline void pddgpu_memory_stats_remove_leak_object(struct pddgpu_device *
 			break;
 		}
 	}
-	spin_unlock_irqrestore(&pdev->memory_stats.leak_detector.lock, flags);
+	PDDGPU_MEMORY_STATS_UNLOCK(pdev, flags);
+}
+
+/* 引用计数操作 */
+static inline void pddgpu_memory_leak_object_get(struct pddgpu_memory_leak_object *leak_obj)
+{
+	if (leak_obj)
+		atomic_inc(&leak_obj->ref_count);
+}
+
+static inline void pddgpu_memory_leak_object_put(struct pddgpu_memory_leak_object *leak_obj)
+{
+	if (leak_obj && atomic_dec_and_test(&leak_obj->ref_count))
+		kfree(leak_obj);
 }
 
 #endif /* __PDDGPU_MEMORY_STATS_H__ */

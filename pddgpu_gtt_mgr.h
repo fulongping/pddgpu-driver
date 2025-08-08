@@ -10,14 +10,31 @@
 #include <drm/drm_mm.h>
 #include <drm/ttm/ttm_resource.h>
 #include <linux/spinlock.h>
+#include <linux/atomic.h>
+#include <linux/types.h>
 
 struct pddgpu_device;
+
+/* GTT管理器状态标志 */
+#define PDDGPU_GTT_MGR_STATE_INITIALIZING	0x01
+#define PDDGPU_GTT_MGR_STATE_READY		0x02
+#define PDDGPU_GTT_MGR_STATE_SHUTDOWN		0x04
+#define PDDGPU_GTT_MGR_STATE_ERROR		0x08
+
+/* GTT统计信息结构 */
+struct pddgpu_gtt_stats {
+	u64 total_size;
+	u64 used_size;
+	u32 state;
+	bool is_healthy;
+};
 
 /* PDDGPU GTT 管理器 */
 struct pddgpu_gtt_mgr {
 	struct ttm_resource_manager manager;
 	struct drm_mm mm;
 	spinlock_t lock;
+	atomic_t state;
 };
 
 /* 转换宏 */
@@ -36,7 +53,10 @@ to_pddgpu_device_from_gtt_mgr(struct pddgpu_gtt_mgr *mgr)
 /* 函数声明 */
 int pddgpu_gtt_mgr_init(struct pddgpu_device *pdev, uint64_t gtt_size);
 void pddgpu_gtt_mgr_fini(struct pddgpu_device *pdev);
-void pddgpu_gtt_mgr_recover(struct pddgpu_gtt_mgr *mgr);
+int pddgpu_gtt_mgr_recover(struct pddgpu_gtt_mgr *mgr);
+bool pddgpu_gtt_mgr_is_healthy(struct pddgpu_gtt_mgr *mgr);
+void pddgpu_gtt_mgr_get_stats(struct pddgpu_gtt_mgr *mgr,
+                               struct pddgpu_gtt_stats *stats);
 
 /* 辅助函数 */
 static inline bool pddgpu_gtt_mgr_has_gart_addr(struct ttm_resource *res)

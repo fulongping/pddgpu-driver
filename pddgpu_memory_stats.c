@@ -18,6 +18,38 @@
 /* 默认泄漏检测间隔 (毫秒) */
 #define PDDGPU_DEFAULT_LEAK_CHECK_INTERVAL 5000
 
+/* 内存泄漏监控工作函数 */
+void pddgpu_memory_leak_monitor_work(struct work_struct *work)
+{
+	struct pddgpu_device *pdev = container_of(work, struct pddgpu_device,
+	                                         memory_stats.leak_monitor.leak_monitor_work.work);
+	struct pddgpu_memory_stats_info info;
+	u64 current_time = ktime_get_ns();
+	
+	/* 获取当前内存统计信息 */
+	pddgpu_memory_stats_get_info(pdev, &info);
+	
+	/* 检查是否超过泄漏阈值 */
+	if (info.vram_used + info.gtt_used > pdev->memory_stats.leak_monitor.leak_threshold) {
+		PDDGPU_ERROR("Memory leak detected! Total used: %llu MB\n", 
+		             (info.vram_used + info.gtt_used) >> 20);
+		
+		/* 生成详细泄漏报告 */
+		pddgpu_memory_stats_leak_report(pdev);
+		
+		pdev->memory_stats.leak_monitor.last_leak_report_time = current_time;
+	}
+	
+	/* 执行常规泄漏检测 */
+	pddgpu_memory_stats_leak_check(pdev);
+	
+	/* 重新调度工作队列 */
+	if (pdev->memory_stats.leak_monitor.monitor_enabled) {
+		schedule_delayed_work(&pdev->memory_stats.leak_monitor.leak_monitor_work,
+		                     msecs_to_jiffies(5000)); /* 5秒间隔 */
+	}
+}
+
 /* 内存统计模块初始化 */
 int pddgpu_memory_stats_init(struct pddgpu_device *pdev)
 {
@@ -53,6 +85,21 @@ int pddgpu_memory_stats_init(struct pddgpu_device *pdev)
 	atomic64_set(&pdev->memory_stats.debug.debug_moves, 0);
 	atomic64_set(&pdev->memory_stats.debug.debug_evictions, 0);
 	
+#if PDDGPU_MEMORY_LEAK_MONITOR_ENABLED
+	/* 初始化内存泄漏监控 */
+	INIT_DELAYED_WORK(&pdev->memory_stats.leak_monitor.leak_monitor_work,
+	                  pddgpu_memory_leak_monitor_work);
+	pdev->memory_stats.leak_monitor.last_leak_report_time = 0;
+	pdev->memory_stats.leak_monitor.leak_threshold = PDDGPU_MEMORY_LEAK_THRESHOLD;
+	pdev->memory_stats.leak_monitor.monitor_enabled = true;
+	
+	/* 启动监控进程 */
+	schedule_delayed_work(&pdev->memory_stats.leak_monitor.leak_monitor_work,
+	                     msecs_to_jiffies(5000));
+	
+	PDDGPU_DEBUG("Memory leak monitor started\n");
+#endif
+	
 	PDDGPU_DEBUG("Memory statistics module initialized successfully\n");
 	return 0;
 }
@@ -64,6 +111,14 @@ void pddgpu_memory_stats_fini(struct pddgpu_device *pdev)
 	unsigned long flags;
 	
 	PDDGPU_DEBUG("Finalizing memory statistics module\n");
+	
+#if PDDGPU_MEMORY_LEAK_MONITOR_ENABLED
+	/* 停止监控进程 */
+	pdev->memory_stats.leak_monitor.monitor_enabled = false;
+	cancel_delayed_work_sync(&pdev->memory_stats.leak_monitor.leak_monitor_work);
+	
+	PDDGPU_DEBUG("Memory leak monitor stopped\n");
+#endif
 	
 	/* 清理泄漏检测对象 */
 	spin_lock_irqsave(&pdev->memory_stats.leak_detector.lock, flags);

@@ -40,6 +40,10 @@
 
 #include "pddgpu_regs.h"
 
+/* 内存泄漏监控宏 */
+#define PDDGPU_MEMORY_LEAK_MONITOR_ENABLED 1
+#define PDDGPU_MEMORY_LEAK_THRESHOLD (100 * 1024 * 1024) /* 100MB */
+
 /* 前向声明 */
 struct pddgpu_device;
 struct pddgpu_bo;
@@ -158,6 +162,16 @@ struct pddgpu_device {
 			atomic64_t debug_moves;
 			atomic64_t debug_evictions;
 		} debug;
+		
+#if PDDGPU_MEMORY_LEAK_MONITOR_ENABLED
+		/* 内存泄漏监控工作队列 */
+		struct {
+			struct delayed_work leak_monitor_work;
+			u64 last_leak_report_time;
+			u64 leak_threshold;
+			bool monitor_enabled;
+		} leak_monitor;
+#endif
 	} memory_stats;
 };
 

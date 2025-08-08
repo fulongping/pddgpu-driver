@@ -91,6 +91,9 @@ void pddgpu_memory_stats_performance_start(struct pddgpu_device *pdev, ktime_t *
 void pddgpu_memory_stats_performance_end(struct pddgpu_device *pdev, ktime_t start_time, 
                                         atomic64_t *time_total, atomic64_t *count);
 
+/* 内存泄漏监控工作函数 */
+void pddgpu_memory_leak_monitor_work(struct work_struct *work);
+
 /* 内存使用统计更新 */
 void pddgpu_memory_stats_update_usage(struct pddgpu_device *pdev, u32 domain, u64 size, bool alloc);
 

@@ -117,13 +117,15 @@ void pddgpu_device_fini(struct pddgpu_device *pdev)
 	/* 清理GMC */
 	pddgpu_gmc_fini(pdev);
 	
+
 	/* 清理内存统计模块 */
 	pddgpu_memory_stats_fini(pdev);
 	
-	/* 取消映射MMIO区域 */
-	if (pdev->rmmio)
+	/* 取消映射MMIO */
+	if (pdev->rmmio) {
 		pci_iounmap(pci_dev, pdev->rmmio);
-	
+		pdev->rmmio = NULL;
+	}
 	PDDGPU_DEBUG("PDDGPU device finalized\n");
 }
 

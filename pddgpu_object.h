@@ -60,6 +60,7 @@ struct pddgpu_bo {
 	ktime_t allocation_start_time;
 	ktime_t deallocation_start_time;
 	ktime_t move_start_time;
+
 };
 
 /* PDDGPU VRAM管理器 */

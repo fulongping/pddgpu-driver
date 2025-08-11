@@ -67,10 +67,10 @@
 #define PDDGPU_PL_VRAM               2
 
 /* 寄存器读写宏 */
-#define PDDGPU_READ32(pdev, reg)          readl((pdev)->rmmio + (reg))
-#define PDDGPU_WRITE32(pdev, reg, val)    writel((val), (pdev)->rmmio + (reg))
-#define PDDGPU_READ64(pdev, reg)          readq((pdev)->rmmio + (reg))
-#define PDDGPU_WRITE64(pdev, reg, val)    writeq((val), (pdev)->rmmio + (reg))
+#define PDDGPU_READ32(addr)          readl(addr)
+#define PDDGPU_WRITE32(addr, val)    writel(val, addr)
+#define PDDGPU_READ64(addr)          readq(addr)
+#define PDDGPU_WRITE64(addr, val)    writeq(val, addr)
 
 /* 寄存器字段定义 */
 #define PDDGPU_REG_FIELD_MASK(reg, field) \

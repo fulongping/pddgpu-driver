@@ -12,24 +12,8 @@
 #include <linux/mutex.h>
 #include <linux/list.h>
 #include <linux/atomic.h>
-#include <linux/types.h>
 
 struct pddgpu_device;
-
-/* VRAM管理器状态标志 */
-#define PDDGPU_VRAM_MGR_STATE_INITIALIZING	0x01
-#define PDDGPU_VRAM_MGR_STATE_READY		0x02
-#define PDDGPU_VRAM_MGR_STATE_SHUTDOWN		0x04
-#define PDDGPU_VRAM_MGR_STATE_ERROR		0x08
-
-/* VRAM统计信息结构 */
-struct pddgpu_vram_stats {
-	u64 total_size;
-	u64 used_size;
-	u64 visible_used;
-	u32 state;
-	bool is_healthy;
-};
 
 /* PDDGPU VRAM 管理器 */
 struct pddgpu_vram_mgr {
@@ -40,11 +24,7 @@ struct pddgpu_vram_mgr {
 	struct list_head reservations_pending;
 	struct list_head reserved_pages;
 	atomic64_t vis_usage;
-	atomic64_t used;
-	atomic_t state;
 	u64 default_page_size;
-	u64 size;
-	u64 visible_size;
 };
 
 /* PDDGPU VRAM 管理器资源 */
@@ -97,10 +77,6 @@ static inline void pddgpu_vram_mgr_set_cleared(struct ttm_resource *res)
 /* 函数声明 */
 int pddgpu_vram_mgr_init(struct pddgpu_device *pdev);
 void pddgpu_vram_mgr_fini(struct pddgpu_device *pdev);
-int pddgpu_vram_mgr_recover(struct pddgpu_vram_mgr *mgr);
-bool pddgpu_vram_mgr_is_healthy(struct pddgpu_vram_mgr *mgr);
-void pddgpu_vram_mgr_get_stats(struct pddgpu_vram_mgr *mgr,
-                                struct pddgpu_vram_stats *stats);
 
 /* 辅助函数 */
 static inline struct drm_buddy_block *

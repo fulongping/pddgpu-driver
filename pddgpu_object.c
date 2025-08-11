@@ -44,15 +44,23 @@ static int pddgpu_bo_move(struct ttm_buffer_object *bo, bool evict,
                           struct ttm_place *hop)
 {
 	struct pddgpu_bo *abo = to_pddgpu_bo(bo);
+	struct pddgpu_device *pdev = pddgpu_ttm_pdev(bo->bdev);
+
 	int ret;
 
 	PDDGPU_DEBUG("Moving BO: size=%lu, new_mem=%p\n", bo->base.size, new_mem);
+
+	/* 开始内存移动统计 */
+	pddgpu_memory_stats_move_start(pdev, abo);
 
 	ret = ttm_bo_move_memcpy(bo, evict, ctx, new_mem);
 	if (ret) {
 		PDDGPU_ERROR("Failed to move BO: %d\n", ret);
 		return ret;
 	}
+
+	/* 完成内存移动统计 */
+	pddgpu_memory_stats_move_end(pdev, abo);
 
 	/* 更新BO信息 */
 	abo->domain = new_mem->mem_type;
@@ -87,17 +95,27 @@ int pddgpu_bo_create(struct pddgpu_device *pdev, struct pddgpu_bo_param *bp, str
 	unsigned long page_align, size = bp->size;
 	int r;
 
+
+	/* 开始内存分配统计 */
+	pddgpu_memory_stats_alloc_start(pdev, NULL, size, bp->domain);
+
 	/* 验证大小和域 */
-	if (!pddgpu_bo_validate_size(pdev, size, bp->domain))
+	if (!pddgpu_bo_validate_size(pdev, size, bp->domain)) {
+		pddgpu_memory_stats_alloc_end(pdev, NULL, -ENOMEM);
 		return -ENOMEM;
+	}
+
 
 	/* 确保BO结构大小足够 */
 	BUG_ON(bp->bo_ptr_size < sizeof(struct pddgpu_bo));
 
 	*bo_ptr = NULL;
 	bo = kvzalloc(bp->bo_ptr_size, GFP_KERNEL);
-	if (bo == NULL)
+	if (bo == NULL) {
+		pddgpu_memory_stats_alloc_end(pdev, NULL, -ENOMEM);
 		return -ENOMEM;
+	}
+
 
 	/* 初始化GEM对象 */
 	drm_gem_private_object_init(pdev_to_drm(pdev), &bo->tbo.base, size);
@@ -115,6 +133,10 @@ int pddgpu_bo_create(struct pddgpu_device *pdev, struct pddgpu_bo_param *bp, str
 	bo->flags = bp->flags;
 
 	/* 设置xcp_id */
+	// gmc.mem_partitions用于指示GPU是否支持空间分区（spatial partitioning），
+	// 如果mem_partitions非零，表示该GPU支持多个内存分区（如多XCP），
+	// 此时BO对象的xcp_id可用于指定分配到哪个分区；否则xcp_id恒为0。
+
 	if (pdev->gmc.mem_partitions)
 		/* For GPUs with spatial partitioning, bo->xcp_id=-1 means any partition */
 		bo->xcp_id = bp->xcp_id_plus1 - 1;
@@ -150,18 +172,24 @@ int pddgpu_bo_create(struct pddgpu_device *pdev, struct pddgpu_bo_param *bp, str
 	r = ttm_bo_init_reserved(&pdev->mman.bdev, &bo->tbo, bp->type,
 				 &bo->placement, page_align, &ctx, NULL,
 				 bp->resv, bp->destroy);
-	if (unlikely(r != 0))
+
+	if (unlikely(r != 0)) {
+		pddgpu_memory_stats_alloc_end(pdev, bo, r);
 		return r;
+	}
+
 
 	/* 报告移动的字节数 */
 	if (!pddgpu_gmc_vram_full_visible(&pdev->gmc) &&
 	    pddgpu_res_cpu_visible(pdev, bo->tbo.resource))
-		/* 为什么需要move？
-		 * 这里调用pddgpu_cs_report_moved_bytes是为了在VRAM不是全可见的情况下，
-		 * 并且资源对CPU可见时，报告实际移动的字节数（ctx.bytes_moved）。
-		 * 这样可以让驱动或上层了解有多少数据被移动到CPU可见区域，便于资源管理和调度。
+
+		/*
+		 * 变量ctx.bytes_moved用于记录在TTM缓冲区对象初始化过程中，内存迁移（move）操作所移动的字节数。
+		 * 某些情况下（如BO首次分配或内存回收时），TTM可能会将BO从一个内存区域迁移到另一个区域（如从GTT到VRAM），
+		 * 这时需要统计迁移的字节数以便驱动层进行性能分析或调度优化。
 		 */
-		pddgpu_cs_report_moved_bytes(pdev, ctx.bytes_moved, ctx.bytes_moved);
+		pddgpu_cs_report_moved_bytes(pdev, ctx.bytes_moved,
+
 					     ctx.bytes_moved);
 	else
 		pddgpu_cs_report_moved_bytes(pdev, ctx.bytes_moved, 0);
@@ -185,6 +213,10 @@ int pddgpu_bo_create(struct pddgpu_device *pdev, struct pddgpu_bo_param *bp, str
 		pddgpu_bo_unreserve(bo);
 
 	*bo_ptr = bo;
+
+	/* 完成内存分配统计 */
+	pddgpu_memory_stats_alloc_end(pdev, bo, 0);
+
 
 	PDDGPU_DEBUG("BO created successfully: %p, size=%lu, domain=0x%x\n",
 	             bo, size, bp->domain);
@@ -217,8 +249,12 @@ void pddgpu_bo_unref(struct pddgpu_bo **bo)
 void pddgpu_bo_destroy(struct ttm_buffer_object *tbo)
 {
 	struct pddgpu_bo *bo = to_pddgpu_bo(tbo);
+	struct pddgpu_device *pdev = pddgpu_ttm_pdev(tbo->bdev);
 
 	PDDGPU_DEBUG("Destroying BO: %p\n", bo);
+
+	/* 开始内存释放统计 */
+	pddgpu_memory_stats_free_start(pdev, bo);
 
 	/* 清理映射 */
 	if (bo->kmap.virtual) {
@@ -229,6 +265,10 @@ void pddgpu_bo_destroy(struct ttm_buffer_object *tbo)
 	if (bo->notifier.ops)
 		mmu_interval_notifier_remove(&bo->notifier);
 #endif
+
+	/* 完成内存释放统计 */
+	pddgpu_memory_stats_free_end(pdev, bo);
+
 
 	/* 释放BO结构 */
 	kvfree(bo);

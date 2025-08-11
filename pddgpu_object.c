@@ -47,25 +47,31 @@ static int pddgpu_bo_move(struct ttm_buffer_object *bo, bool evict,
 	struct pddgpu_device *pdev = pddgpu_ttm_pdev(bo->bdev);
 
 	int ret;
-
+	
+	/* 检查设备状态 */
+	if (!pdev || (atomic_read(&pdev->device_state) & PDDGPU_DEVICE_STATE_SHUTDOWN)) {
+		PDDGPU_DEBUG("Device is shutting down, skipping BO move\n");
+		return -ENODEV;
+	}
+	
 	PDDGPU_DEBUG("Moving BO: size=%lu, new_mem=%p\n", bo->base.size, new_mem);
-
+	
 	/* 开始内存移动统计 */
 	pddgpu_memory_stats_move_start(pdev, abo);
-
+	
 	ret = ttm_bo_move_memcpy(bo, evict, ctx, new_mem);
 	if (ret) {
 		PDDGPU_ERROR("Failed to move BO: %d\n", ret);
 		return ret;
 	}
-
+	
 	/* 完成内存移动统计 */
 	pddgpu_memory_stats_move_end(pdev, abo);
-
+	
 	/* 更新BO信息 */
 	abo->domain = new_mem->mem_type;
 	abo->size = bo->base.size;
-
+	
 	return 0;
 }
 
@@ -83,101 +89,67 @@ static const struct ttm_buffer_object_funcs pddgpu_bo_funcs = {
 /* 创建BO */
 int pddgpu_bo_create(struct pddgpu_device *pdev, struct pddgpu_bo_param *bp, struct pddgpu_bo **bo_ptr)
 {
-	struct ttm_operation_ctx ctx = {
-		.interruptible = (bp->type != ttm_bo_type_kernel),
-		.no_wait_gpu = bp->no_wait_gpu,
-		/* We opt to avoid OOM on system pages allocations */
-		.gfp_retry_mayfail = true,
-		.allow_res_evict = bp->type != ttm_bo_type_kernel,
-		.resv = bp->resv
-	};
 	struct pddgpu_bo *bo;
-	unsigned long page_align, size = bp->size;
+	struct ttm_operation_ctx ctx = {
+		.interruptible = true,
+		.no_wait_gpu = bp->no_wait_gpu,
+	};
+	unsigned long page_align = 0;
 	int r;
-
-
+	
+	/* 检查设备状态 */
+	if (!pdev || (atomic_read(&pdev->device_state) & PDDGPU_DEVICE_STATE_SHUTDOWN)) {
+		PDDGPU_ERROR("Device is not ready or shutting down\n");
+		return -ENODEV;
+	}
+	
 	/* 开始内存分配统计 */
-	pddgpu_memory_stats_alloc_start(pdev, NULL, size, bp->domain);
-
+	pddgpu_memory_stats_alloc_start(pdev, NULL, bp->size, bp->domain);
+	
 	/* 验证大小和域 */
-	if (!pddgpu_bo_validate_size(pdev, size, bp->domain)) {
+	if (!pddgpu_bo_validate_size(pdev, bp->size, bp->domain)) {
 		pddgpu_memory_stats_alloc_end(pdev, NULL, -ENOMEM);
 		return -ENOMEM;
 	}
-
-
 	/* 确保BO结构大小足够 */
 	BUG_ON(bp->bo_ptr_size < sizeof(struct pddgpu_bo));
 
 	*bo_ptr = NULL;
 	bo = kvzalloc(bp->bo_ptr_size, GFP_KERNEL);
+
 	if (bo == NULL) {
 		pddgpu_memory_stats_alloc_end(pdev, NULL, -ENOMEM);
 		return -ENOMEM;
 	}
 
-
 	/* 初始化GEM对象 */
-	drm_gem_private_object_init(pdev_to_drm(pdev), &bo->tbo.base, size);
-	bo->tbo.base.funcs = &pddgpu_gem_object_funcs;
-	bo->vm_bo = NULL;
-
-	/* 设置首选和允许的域 */
-	bo->preferred_domains = bp->preferred_domain ? bp->preferred_domain : bp->domain;
-	bo->allowed_domains = bo->preferred_domains;
-	if (bp->type != ttm_bo_type_kernel &&
-	    !(bp->flags & PDDGPU_GEM_CREATE_DISCARDABLE) &&
-	    bo->allowed_domains == PDDGPU_GEM_DOMAIN_VRAM)
-		bo->allowed_domains |= PDDGPU_GEM_DOMAIN_GTT;
-
+	drm_gem_private_object_init(&pdev->ddev->drm, &bo->tbo.base, bp->size);
+	
+	/* 设置BO属性 */
+	bo->preferred_domains = bp->preferred_domain;
+	bo->allowed_domains = bp->allowed_domain;
 	bo->flags = bp->flags;
-
-	/* 设置xcp_id */
-	// gmc.mem_partitions用于指示GPU是否支持空间分区（spatial partitioning），
-	// 如果mem_partitions非零，表示该GPU支持多个内存分区（如多XCP），
-	// 此时BO对象的xcp_id可用于指定分配到哪个分区；否则xcp_id恒为0。
-
-	if (pdev->gmc.mem_partitions)
-		/* For GPUs with spatial partitioning, bo->xcp_id=-1 means any partition */
-		bo->xcp_id = bp->xcp_id_plus1 - 1;
-	else
-		/* For GPUs without spatial partitioning */
-		bo->xcp_id = 0;
-
-	/* 检查USWC支持 */
-	if (!pddgpu_bo_support_uswc(bo->flags))
-		bo->flags &= ~PDDGPU_GEM_CREATE_CPU_GTT_USWC;
-
-	/* 设置TTM设备 */
 	bo->tbo.bdev = &pdev->mman.bdev;
-
+	bo->tbo.type = bp->type;
+	bo->tbo.page_alignment = bp->byte_align >> PAGE_SHIFT;
+	bo->tbo.bo_ptr_size = bp->bo_ptr_size;
+	
 	/* 设置放置策略 */
 	pddgpu_bo_placement_from_domain(bo, bp->domain);
-
+	
 	/* 设置优先级 */
-	if (bp->type == ttm_bo_type_kernel)
-		bo->tbo.priority = 2;
-	else if (!(bp->flags & PDDGPU_GEM_CREATE_DISCARDABLE))
-		bo->tbo.priority = 1;
-
-	/* 设置销毁函数 */
-	if (!bp->destroy)
-		bp->destroy = &pddgpu_bo_destroy;
-
-	/* 计算页面对齐 */
-	page_align = ALIGN(bp->byte_align, PAGE_SIZE) >> PAGE_SHIFT;
-	size = ALIGN(size, PAGE_SIZE);
-
-	/* 通过TTM初始化缓冲区 */
+	bo->tbo.priority = 0;
+	
+	/* 初始化TTM BO */
 	r = ttm_bo_init_reserved(&pdev->mman.bdev, &bo->tbo, bp->type,
 				 &bo->placement, page_align, &ctx, NULL,
 				 bp->resv, bp->destroy);
 
 	if (unlikely(r != 0)) {
 		pddgpu_memory_stats_alloc_end(pdev, bo, r);
+		kvfree(bo);
 		return r;
 	}
-
 
 	/* 报告移动的字节数 */
 	if (!pddgpu_gmc_vram_full_visible(&pdev->gmc) &&
@@ -206,32 +178,19 @@ int pddgpu_bo_create(struct pddgpu_device *pdev, struct pddgpu_bo_param *bp, str
 		dma_resv_add_fence(bo->tbo.base.resv, fence,
 				   DMA_RESV_USAGE_KERNEL);
 		dma_fence_put(fence);
+
 	}
-
-	/* 如果没有预留，则取消预留 */
-	if (!bp->resv)
-		pddgpu_bo_unreserve(bo);
-
+	
 	*bo_ptr = bo;
-
+	
 	/* 完成内存分配统计 */
 	pddgpu_memory_stats_alloc_end(pdev, bo, 0);
-
-
-	PDDGPU_DEBUG("BO created successfully: %p, size=%lu, domain=0x%x\n",
-	             bo, size, bp->domain);
-
-	/* 对于用户空间BO，CPU_ACCESS_REQUIRED只作为提示 */
-	if (bp->type == ttm_bo_type_device)
-		bo->flags &= ~PDDGPU_GEM_CREATE_CPU_ACCESS_REQUIRED;
+	
+	PDDGPU_DEBUG("Created BO: size=%lu, domain=%u, handle=%p\n", 
+	             bo->tbo.base.size, bp->domain, bo);
+	
 
 	return 0;
-
-fail_unreserve:
-	if (!bp->resv)
-		dma_resv_unlock(bo->tbo.base.resv);
-	pddgpu_bo_unref(&bo);
-	return r;
 }
 
 /* 释放BO引用 */
@@ -250,25 +209,30 @@ void pddgpu_bo_destroy(struct ttm_buffer_object *tbo)
 {
 	struct pddgpu_bo *bo = to_pddgpu_bo(tbo);
 	struct pddgpu_device *pdev = pddgpu_ttm_pdev(tbo->bdev);
-
+	
+	/* 检查设备状态 */
+	if (!pdev || (atomic_read(&pdev->device_state) & PDDGPU_DEVICE_STATE_SHUTDOWN)) {
+		PDDGPU_DEBUG("Device is shutting down, skipping BO destruction\n");
+		return;
+	}
+	
 	PDDGPU_DEBUG("Destroying BO: %p\n", bo);
-
+	
 	/* 开始内存释放统计 */
 	pddgpu_memory_stats_free_start(pdev, bo);
-
+	
 	/* 清理映射 */
-	if (bo->kmap.virtual) {
-		ttm_bo_kunmap(tbo, &bo->kmap);
-	}
-
+	if (bo->kmap.bo)
+		ttm_bo_kunmap(&bo->kmap);
+	
+	/* 清理通知器 */
 #ifdef CONFIG_MMU_NOTIFIER
 	if (bo->notifier.ops)
 		mmu_interval_notifier_remove(&bo->notifier);
 #endif
-
+	
 	/* 完成内存释放统计 */
 	pddgpu_memory_stats_free_end(pdev, bo);
-
 
 	/* 释放BO结构 */
 	kvfree(bo);

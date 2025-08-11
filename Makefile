@@ -10,6 +10,7 @@ pddgpu-objs := pddgpu_drv.o \
                 pddgpu_gtt_mgr.o \
                 pddgpu_memory_stats.o
 
+
 # 内核源码路径
 KERNEL_DIR ?= /lib/modules/$(shell uname -r)/build
 

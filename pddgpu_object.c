@@ -45,6 +45,7 @@ static int pddgpu_bo_move(struct ttm_buffer_object *bo, bool evict,
 {
 	struct pddgpu_bo *abo = to_pddgpu_bo(bo);
 	struct pddgpu_device *pdev = pddgpu_ttm_pdev(bo->bdev);
+
 	int ret;
 	
 	/* 检查设备状态 */
@@ -110,14 +111,17 @@ int pddgpu_bo_create(struct pddgpu_device *pdev, struct pddgpu_bo_param *bp, str
 		pddgpu_memory_stats_alloc_end(pdev, NULL, -ENOMEM);
 		return -ENOMEM;
 	}
-	
-	/* 分配BO结构 */
-	bo = kvzalloc(sizeof(*bo), GFP_KERNEL);
+	/* 确保BO结构大小足够 */
+	BUG_ON(bp->bo_ptr_size < sizeof(struct pddgpu_bo));
+
+	*bo_ptr = NULL;
+	bo = kvzalloc(bp->bo_ptr_size, GFP_KERNEL);
+
 	if (bo == NULL) {
 		pddgpu_memory_stats_alloc_end(pdev, NULL, -ENOMEM);
 		return -ENOMEM;
 	}
-	
+
 	/* 初始化GEM对象 */
 	drm_gem_private_object_init(&pdev->ddev->drm, &bo->tbo.base, bp->size);
 	
@@ -125,9 +129,6 @@ int pddgpu_bo_create(struct pddgpu_device *pdev, struct pddgpu_bo_param *bp, str
 	bo->preferred_domains = bp->preferred_domain;
 	bo->allowed_domains = bp->allowed_domain;
 	bo->flags = bp->flags;
-	bo->xcp_id = bp->xcp_id_plus1 - 1;
-	
-	/* 设置TTM BO属性 */
 	bo->tbo.bdev = &pdev->mman.bdev;
 	bo->tbo.type = bp->type;
 	bo->tbo.page_alignment = bp->byte_align >> PAGE_SHIFT;
@@ -143,16 +144,41 @@ int pddgpu_bo_create(struct pddgpu_device *pdev, struct pddgpu_bo_param *bp, str
 	r = ttm_bo_init_reserved(&pdev->mman.bdev, &bo->tbo, bp->type,
 				 &bo->placement, page_align, &ctx, NULL,
 				 bp->resv, bp->destroy);
+
 	if (unlikely(r != 0)) {
 		pddgpu_memory_stats_alloc_end(pdev, bo, r);
 		kvfree(bo);
 		return r;
 	}
-	
-	/* 如果是VRAM分配，清除内存 */
-	if (bo->tbo.resource && bo->tbo.resource->mem_type == TTM_PL_VRAM) {
-		/* 清除VRAM内容 */
-		memset(bo->tbo.base.vmap, 0, bo->tbo.base.size);
+
+	/* 报告移动的字节数 */
+	if (!pddgpu_gmc_vram_full_visible(&pdev->gmc) &&
+	    pddgpu_res_cpu_visible(pdev, bo->tbo.resource))
+
+		/*
+		 * 变量ctx.bytes_moved用于记录在TTM缓冲区对象初始化过程中，内存迁移（move）操作所移动的字节数。
+		 * 某些情况下（如BO首次分配或内存回收时），TTM可能会将BO从一个内存区域迁移到另一个区域（如从GTT到VRAM），
+		 * 这时需要统计迁移的字节数以便驱动层进行性能分析或调度优化。
+		 */
+		pddgpu_cs_report_moved_bytes(pdev, ctx.bytes_moved,
+
+					     ctx.bytes_moved);
+	else
+		pddgpu_cs_report_moved_bytes(pdev, ctx.bytes_moved, 0);
+
+	/* VRAM清理（如果需要） */
+	if (bp->flags & PDDGPU_GEM_CREATE_VRAM_CLEARED &&
+	    bo->tbo.resource->mem_type == TTM_PL_VRAM) {
+		struct dma_fence *fence;
+
+		r = pddgpu_ttm_clear_buffer(bo, bo->tbo.base.resv, &fence);
+		if (unlikely(r))
+			goto fail_unreserve;
+
+		dma_resv_add_fence(bo->tbo.base.resv, fence,
+				   DMA_RESV_USAGE_KERNEL);
+		dma_fence_put(fence);
+
 	}
 	
 	*bo_ptr = bo;
@@ -163,6 +189,7 @@ int pddgpu_bo_create(struct pddgpu_device *pdev, struct pddgpu_bo_param *bp, str
 	PDDGPU_DEBUG("Created BO: size=%lu, domain=%u, handle=%p\n", 
 	             bo->tbo.base.size, bp->domain, bo);
 	
+
 	return 0;
 }
 
@@ -206,7 +233,7 @@ void pddgpu_bo_destroy(struct ttm_buffer_object *tbo)
 	
 	/* 完成内存释放统计 */
 	pddgpu_memory_stats_free_end(pdev, bo);
-	
+
 	/* 释放BO结构 */
 	kvfree(bo);
 }

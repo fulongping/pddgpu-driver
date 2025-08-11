@@ -182,6 +182,7 @@ struct pddgpu_device {
 		} leak_monitor;
 #endif
 	} memory_stats;
+
 };
 
 /* PDDGPU BO */
